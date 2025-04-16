@@ -2,6 +2,5 @@
 fp-info-cache
 gerbers/
 plots/
-*.zip
 *-backups/
 ~*.lck
