@@ -6,6 +6,8 @@
 	(paper "A4")
 	(title_block
 		(title "Dehumidifier Controller")
+		(date "3/25/2025")
+		(rev "V1.0")
 	)
 	(lib_symbols
 		(symbol "Connector_Generic:Conn_01x02"
