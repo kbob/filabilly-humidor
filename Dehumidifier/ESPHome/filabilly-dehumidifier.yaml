@@ -1,171 +1,479 @@
+# The ESPHome configuration for the FilaBilly Dehumidifier has a lot
+# of moving parts.  At the heart, it is a chiller.  The chiller keeps
+# a heatsink cold so that water in the air moving past it will
+# condense out.
+#
+# It can be run in one of three modes.
+#
+#  - Standalone.  It presents a web server for control and, if
+#    necessary, its own Wi-Fi access point and captive portal.
+#
+#  - Under Home Assistant control.  It exports several entities to HA.
+#
+#  - As a component of the FilaBilly Humidor (FBH).  The FBH also
+#    has the option to run standalone or under Home Assistant control.
+#
+# In any mode, the client can monitor sensors and change settings.
+# Plus, there are several additional sensors and settings that are
+# hidden by default.
+#
+# Let's start at the PID Climate component.  It monitors the chiller
+# temperature, uses a PID loop to adjust power through the peltier
+# output.
+#
+# The freeze and defrost script continuously cycle the chiller
+# temperature between just below and just above freezing.  The
+# temperature changes happen continuously whether the chiller is
+# running or not.
+# 
+# There is a temperature and humidity sensor outside the chiller.
+# The temperature is exposed to clients but not otherwise used.
+# The humidity is used to determine when the chiller should run.
+#
+# The high_humidity virtual sensor calculates whether the ambient
+# humidity is high enough that the chiller needs to run.  Clients
+# can adjust the target humidity.
+# 
+# The Disable switch, which is software-only and set by clients,
+# disables the chiller when set.
+# 
+# The fan runs when the chiller runs.  Clients can adjust the
+# fan speed.  I recommend full speed if you can tolerate the noise.
+# At slower speeds, you should reduce the vent opening on the
+# dehumidifier's bottom.
+#
+# There is a software button, hidden by default, that runs a PID
+# autotune process for the chiller.  The PID autotune results are
+# displayed in the log, so watch the log if you run the tuning.  Then
+# copy the tuned values into this configuration file and update
+# the device.
+#
+# There are various non-dehumidifier-specific components, too.
+#   - logger
+#   - wifi
+#   - ota
+#   - captive_portal
+#   - api
+#   - web_server
+
+
 esphome:
-  name: filabilly-dehumidifier-0609c4
-  friendly_name: FilaBilly Dehumidifier
-  name_add_mac_suffix: false
+  name: filabilly-dehumidifier
+  friendly_name: "Filabilly Dehumidifier"
+  # If you have more than one FBD on your network,  uncomment.
+  # name_add_mac_suffix: true
+
+  # Automation
   on_boot:
     priority: -100
     then:
-      - script.execute: mode_thaw
+      - script.execute: defrost_script
+
 
 esp32:
   board: seeed_xiao_esp32c3
-  framework:
-    type: arduino
 
-# Enable logging
+
+# Logger.  Some of the sensors are too chatty.
+# PID autotune results appear in the log.
 logger:
   level: DEBUG
   logs:
-    sensor: INFO
-    dallasng.sensor: INFO
+    climate: INFO
+    dallas.temp.sensor: INFO
     dht: INFO
+    switch: INFO
+    sensor: INFO
 
-# Enable Home Assistant API
-api:
-  encryption:
-    key: !secret filabilly_dehumidifier_key
-  reboot_timeout: 0s
 
+# Wi-Fi.
+# Set your SSID and password.
+# Secrets are explained here.
+# https://esphome.io/guides/faq.html#tips-for-using-esphome
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   ap:
-    ssid: FilaBilly Dehumidifier HotSpot
+    ssid: "FilaBilly Dehumidifier HotSpot"
     password: !secret wifi_password
 
+
+# Captive portal is a fallback when no known Wi-Fi network is found.
+captive_portal:
+
+
+# Over-the-Air Updates
 ota:
   platform: esphome
   id: fbd_ota
   password: !secret filabilly_dehumidifier_ota
 
-captive_portal:
 
+# Web Interface - used standalone and by FilaBilly Humidor
+web_server:
+  ota: false
+  version: 3
+  sorting_groups:
+    - id: status_sorting_group
+      name: "Status"
+      sorting_weight: 10
+    - id: settings_sorting_group
+      name: "Settings"
+      sorting_weight: 20
+    - id: debug_sorting_group
+      name: "Debug"
+      sorting_weight: 30
+
+
+# -------------------------------------------------------------------- #
+# Components specific to the dehumidifier follow.  Components are in
+# alphabetical order, because there is no useful ordering, and there
+# are too many to visually scan.
+
+# Home Assistant API
+api:
+  encryption:
+    key: !secret filabilly_dehumidifier_key
+  reboot_timeout: 0s
+
+
+binary_sensor:
+
+  # High Humidity: convert humidity comparison to a debounced boolean
+  - platform: template
+    id: high_hum_binary_sensor
+    internal: true
+    filters:
+      - settle: 2min
+    on_press:
+      then:
+        - script.execute: maybe_start_script
+    on_release:
+      then:
+        - script.execute: stop_script
+    lambda: |-
+      float target = id(target_hum_number).state;
+      float hum = id(dht_hum_sensor).state;
+      if (std::isnan(target)) { return true; }
+      if (std::isnan(hum)) { return true; }
+      return hum > target;
+
+
+button:
+  - platform: template
+    name: "Autotune Chiller PID"
+    icon: mdi:gesture-tap-button
+    disabled_by_default: true
+    on_press:
+      - climate.pid.set_control_parameters:
+          id: chiller_climate
+          kp: 0.0
+          ki: 0.0
+          kd: 0.0
+      - climate.pid.autotune: chiller_climate
+    # web server version 3
+    web_server:
+      sorting_group_id: debug_sorting_group
+      sorting_weight: 60
+
+
+climate:
+
+  - platform: pid
+    id: chiller_climate
+    name: "Chiller PID Climate"
+    sensor: chiller_temp_sensor
+    default_target_temperature: -0.5 °C
+    cool_output: peltier_output
+    visual:
+      min_temperature: -4 °C
+      max_temperature: 10 °C
+    disabled_by_default: true
+    # PID Climate variables
+    control_parameters:
+      kp: 0.29103
+      ki: 0.01212
+      kd: 1.74654
+      output_averaging_samples: 2
+      derivative_averaging_samples: 6
+    # web server version 3
+    web_server:
+      sorting_group_id: debug_sorting_group
+      sorting_weight: 10
+
+
+# # I2C is not used.  These pins are connected to the QWIIC connector
+# # on the controller PCB if you want to add I2C peripherals.
 # i2c:
 #   sda: GPIO6
 #   scl: GPIO7
 #   scan: true
 
-web_server:
-  ota: false
-  version: 3
 
-external_components:
-  - source: github://nrandell/dallasng
+number:
 
-dallasng:
-  - pin: GPIO10
-    update_interval: 1.5s
+  # Target Humidity: client-settable target
+  - platform: template
+    id: target_hum_number
+    name: "Target Humidity"
+    icon: mdi:water-percent
+    unit_of_measurement: "%"
+    device_class: 'humidity'
+    # Template Number variables
+    min_value: 0
+    max_value: 100
+    step: 1
+    restore_value: true
+    initial_value: 20
+    optimistic: true
+    # Automations
+    on_value:
+      then:
+        - script.execute: maybe_start_stop_script
+    # web server version 3
+    web_server:
+      sorting_group_id: settings_sorting_group
+      sorting_weight: 20
 
-sensor:
-  - platform: dallasng
-    index: 0
-    name: "Cold Side Temperature"
-    id: cold_temperature
-  - platform: dht
-    model: DHT22
-    pin: GPIO20
-    temperature:
-      name: "DHT22 Temperature"
-    humidity:
-      name: "DHT22 Humidity"
-      accuracy_decimals: 1
-    update_interval: 5s
-  - platform: pulse_counter
-    pin:
-      number: GPIO4
-      mode: INPUT_PULLUP
-    name: "Fan Speed"
-    update_interval: 60s
-    unit_of_measurement: RPM
-    accuracy_decimals: 0
-    filters:
-      - multiply: 0.5   # 2 pulses/rev
-  - platform: pid
-    name: Peltier PWM
-    type: COOL
-  - platform: pid
-    name: "[P]ID"
-    type: PROPORTIONAL
-  - platform: pid
-    name: "P[I]D"
-    type: INTEGRAL
-  - platform: pid
-    name: "PI[D]"
-    type: DERIVATIVE
+  # Fan Power Level: client-settable airflow/noise tradeoff
+  - platform: template
+    id: fan_power_number
+    name: "Fan Power Level"
+    icon: mdi:fan
+    unit_of_measurement: "%"
+    # Template Number variables
+    min_value: 20
+    max_value: 100
+    step: 1
+    restore_value: true
+    initial_value: 100
+    optimistic: true
+    # Automation
+    on_value:
+      then:
+        - script.execute: maybe_start_script
+    # web server version 3
+    web_server:
+      sorting_group_id: settings_sorting_group
+      sorting_weight: 30
 
-switch:
-  - platform: gpio
-    pin: GPIO3
-    id: fan
-    # name: "Fan"
-    internal: true
-    restore_mode: ALWAYS_ON
-  - platform: gpio
-    pin: GPIO5
-    id: peltier_mosfet
-    restore_mode: ALWAYS_OFF
-    internal: true
+
+# 1-Wire bus used by DS18B20 chiller temperature sensor
+one_wire:
+  platform: gpio
+  pin: GPIO10
 
 output:
+
+  # Fan Speed: PWM fan control
+  - platform: ledc
+    id: fan_speed_output
+    pin: GPIO3
+    frequency: 25000Hz
+
+  # Peltier switching
   - platform: sigma_delta_output
-    id: peltier
+    id: peltier_output
     update_interval: 400ms
     min_power: 0.0
     max_power: 1.0
     turn_on_action:
       then:
-        switch.turn_on: peltier_mosfet
+        switch.turn_on: peltier_switch
     turn_off_action:
       then:
-        switch.turn_off: peltier_mosfet
+        switch.turn_off: peltier_switch
 
-climate:
-  - platform: pid
-    id: pid_climate
-    name: Thermostat
-    sensor: cold_temperature
-    default_target_temperature: -0.5 °C
-    cool_output: peltier
-    visual:
-      min_temperature: -4 °C
-      max_temperature: 10 °C
-    control_parameters:
-      # kp: 0.3
-      # ki: 0.006
-      # kd: 1.7
-      # Parameters from autotune in free air
-      kp: 0.42160
-      ki: 0.02868
-      kd: 1.54945
-      output_averaging_samples: 2
-      derivative_averaging_samples: 6
-    on_state:
-      - logger.log: "state updated"
-      - lambda: |-
-          if (x.mode == CLIMATE_MODE_OFF) {
-            id(fan).turn_off();
-          } else {
-            id(fan).turn_on();
-          }
 
 script:
-  - id: mode_normal
+
+  # Maybe Start Stop: either start or stop the chiller as appropriate
+  - id: maybe_start_stop_script
+    then:
+      if:
+        condition:
+          and:
+            - switch.is_off: disable_switch
+            - binary_sensor.is_on: high_hum_binary_sensor
+        then:
+          - script.execute: start_script
+        else:
+          - script.execute: stop_script
+
+  # Maybe Start: start the chiller if appropriate
+  - id: maybe_start_script
+    then:
+      if:
+        condition:
+          and:
+            - switch.is_off: disable_switch
+            - binary_sensor.is_on: high_hum_binary_sensor
+        then:
+          script.execute: start_script
+
+  # Start: unconditionally start the chiller
+  - id: start_script
+    then:
+      - logger.log: "starting chiller"
+      - lambda: |-
+          float speed = id(fan_power_number).state;
+          if (std::isnan(speed)) {
+            speed = 100.0;
+          }
+          id(fan_speed_output).set_level(speed / 100.0);
+      - climate.control:
+          id: chiller_climate
+          mode: COOL
+
+  # Stop: unconditionally stop the chiller
+  - id: stop_script
+    then:
+      - logger.log: "stopping chiller"
+      - output.set_level:
+          id: fan_speed_output
+          level: 0
+      - climate.control:
+          id: chiller_climate
+          mode: "OFF"
+
+  # Defrost and Freeze endlessly cycle the temperature just above
+  # and just below freezing.  Below zero causes fastest condensation,
+  # but ice builds up.  Above lets the ice melt and drip away.
+  - id: defrost_script
     then:
       - climate.control:
-          id: pid_climate
-          target_temperature: -0.5 °C
-      - delay: 15min
-      - script.execute: mode_thaw
-  - id: mode_thaw
-    then:
-      - climate.control:
-          id: pid_climate
+          id: chiller_climate
           target_temperature: 2 °C
       - delay: 5min
-      - script.execute: mode_normal
+      - script.execute: freeze_script
 
-button:
+  - id: freeze_script
+    then:
+      - climate.control:
+          id: chiller_climate
+          target_temperature: -0.5 °C
+      - delay: 15min
+      - script.execute: defrost_script
+
+
+sensor:
+
+  # Envionmental Temperature/Humidity sensors
+  - platform: dht
+    model: DHT22
+    pin: GPIO20
+    temperature:
+      name: "Env Temperature"
+      icon: mdi:thermometer
+      # web server version 3
+      web_server:
+        sorting_group_id: status_sorting_group
+        sorting_weight: 20
+    humidity:
+      id: dht_hum_sensor
+      name: "Env Humidity"
+      icon: mdi:water-percent
+      accuracy_decimals: 1
+      # web server version 3
+      web_server:
+        sorting_group_id: status_sorting_group
+        sorting_weight: 10
+    update_interval: 5s
+
+  # Chiller Temperature sensor
+  - platform: dallas_temp
+    id: chiller_temp_sensor
+    name: "Chiller Temperature"
+    icon: mdi:snowflake-temperature
+    # web server version 3
+    web_server:
+      sorting_group_id: status_sorting_group
+      sorting_weight: 30
+    update_interval: 5s
+
+  # Fan Speed sensor
+  - platform: pulse_counter
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+    name: "Fan Speed"
+    icon: mdi:speedometer
+    update_interval: 60s
+    unit_of_measurement: RPM
+    accuracy_decimals: 0
+    filters:
+      - multiply: 0.5   # 2 pulses/rev
+    # web server version 3
+    web_server:
+      sorting_group_id: status_sorting_group
+      sorting_weight: 40
+
+  # PID PWM debug info
+  - platform: pid
+    name: "Chiller Power"
+    icon: mdi:pulse
+    type: COOL
+    disabled_by_default: true
+    # web server version 3
+    web_server:
+      sorting_group_id: debug_sorting_group
+      sorting_weight: 20
+
+  # PID P term debug info
+  - platform: pid
+    name: "Chiller PID Proportion"
+    icon: mdi:alpha-p-box-outline
+    type: PROPORTIONAL
+    disabled_by_default: true
+    # web server version 3
+    web_server:
+      sorting_group_id: debug_sorting_group
+      sorting_weight: 30
+
+  # PID I term debug info
+  - platform: pid
+    name: "Chiller PID Integral"
+    icon: mdi:math-integral
+    type: INTEGRAL
+    disabled_by_default: true
+    # web server version 3
+    web_server:
+      sorting_group_id: debug_sorting_group
+      sorting_weight: 40
+
+  # PID D term debug info
+  - platform: pid
+    name: "Chiller PID Derivative"
+    icon: mdi:delta
+    type: DERIVATIVE
+    disabled_by_default: true
+    # web server version 3
+    web_server:
+      sorting_group_id: debug_sorting_group
+      sorting_weight: 50
+
+
+switch:
+
+  # Disable switch: for FilaBilly Humidor and other clients
   - platform: template
-    name: Climate PID autotune
-    on_press:
-      - climate.pid.autotune: pid_climate
+    id: disable_switch
+    name: "Disable"
+    icon: mdi:air-humidifier-off
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      script.execute: stop_script
+    turn_off_action:
+      script.execute: maybe_start_script
+    optimistic: true
+    # web server version 3
+    web_server:
+      sorting_group_id: settings_sorting_group
+      sorting_weight: 10
+
+  # Peltier switch
+  - platform: gpio
+    pin: GPIO5
+    id: peltier_switch
+    restore_mode: ALWAYS_OFF
+    internal: true
