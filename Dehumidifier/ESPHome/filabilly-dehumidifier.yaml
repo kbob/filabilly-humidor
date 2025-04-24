@@ -1,0 +1,171 @@
+esphome:
+  name: filabilly-dehumidifier-0609c4
+  friendly_name: FilaBilly Dehumidifier
+  name_add_mac_suffix: false
+  on_boot:
+    priority: -100
+    then:
+      - script.execute: mode_thaw
+
+esp32:
+  board: seeed_xiao_esp32c3
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+  level: DEBUG
+  logs:
+    sensor: INFO
+    dallasng.sensor: INFO
+    dht: INFO
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret filabilly_dehumidifier_key
+  reboot_timeout: 0s
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: FilaBilly Dehumidifier HotSpot
+    password: !secret wifi_password
+
+ota:
+  platform: esphome
+  id: fbd_ota
+  password: !secret filabilly_dehumidifier_ota
+
+captive_portal:
+
+# i2c:
+#   sda: GPIO6
+#   scl: GPIO7
+#   scan: true
+
+web_server:
+  ota: false
+  version: 3
+
+external_components:
+  - source: github://nrandell/dallasng
+
+dallasng:
+  - pin: GPIO10
+    update_interval: 1.5s
+
+sensor:
+  - platform: dallasng
+    index: 0
+    name: "Cold Side Temperature"
+    id: cold_temperature
+  - platform: dht
+    model: DHT22
+    pin: GPIO20
+    temperature:
+      name: "DHT22 Temperature"
+    humidity:
+      name: "DHT22 Humidity"
+      accuracy_decimals: 1
+    update_interval: 5s
+  - platform: pulse_counter
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+    name: "Fan Speed"
+    update_interval: 60s
+    unit_of_measurement: RPM
+    accuracy_decimals: 0
+    filters:
+      - multiply: 0.5   # 2 pulses/rev
+  - platform: pid
+    name: Peltier PWM
+    type: COOL
+  - platform: pid
+    name: "[P]ID"
+    type: PROPORTIONAL
+  - platform: pid
+    name: "P[I]D"
+    type: INTEGRAL
+  - platform: pid
+    name: "PI[D]"
+    type: DERIVATIVE
+
+switch:
+  - platform: gpio
+    pin: GPIO3
+    id: fan
+    # name: "Fan"
+    internal: true
+    restore_mode: ALWAYS_ON
+  - platform: gpio
+    pin: GPIO5
+    id: peltier_mosfet
+    restore_mode: ALWAYS_OFF
+    internal: true
+
+output:
+  - platform: sigma_delta_output
+    id: peltier
+    update_interval: 400ms
+    min_power: 0.0
+    max_power: 1.0
+    turn_on_action:
+      then:
+        switch.turn_on: peltier_mosfet
+    turn_off_action:
+      then:
+        switch.turn_off: peltier_mosfet
+
+climate:
+  - platform: pid
+    id: pid_climate
+    name: Thermostat
+    sensor: cold_temperature
+    default_target_temperature: -0.5 °C
+    cool_output: peltier
+    visual:
+      min_temperature: -4 °C
+      max_temperature: 10 °C
+    control_parameters:
+      # kp: 0.3
+      # ki: 0.006
+      # kd: 1.7
+      # Parameters from autotune in free air
+      kp: 0.42160
+      ki: 0.02868
+      kd: 1.54945
+      output_averaging_samples: 2
+      derivative_averaging_samples: 6
+    on_state:
+      - logger.log: "state updated"
+      - lambda: |-
+          if (x.mode == CLIMATE_MODE_OFF) {
+            id(fan).turn_off();
+          } else {
+            id(fan).turn_on();
+          }
+
+script:
+  - id: mode_normal
+    then:
+      - climate.control:
+          id: pid_climate
+          target_temperature: -0.5 °C
+      - delay: 15min
+      - script.execute: mode_thaw
+  - id: mode_thaw
+    then:
+      - climate.control:
+          id: pid_climate
+          target_temperature: 2 °C
+      - delay: 5min
+      - script.execute: mode_normal
+
+button:
+  - platform: template
+    name: Climate PID autotune
+    on_press:
+      - climate.pid.autotune: pid_climate
