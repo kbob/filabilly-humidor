@@ -189,13 +189,23 @@ climate:
       min_temperature: -4 °C
       max_temperature: 10 °C
     disabled_by_default: true
+
     # PID Climate variables
     control_parameters:
       kp: 0.29103
       ki: 0.01212
       kd: 1.74654
+      # Autotune result with no D averaging:
+      #   kp: 0.38197
+      #   ki: 0.01909
+      #   kd: 1.91024
+      # Autotune result with 6 sample D averaging:
+      #   kp: 0.29103
+      #   ki: 0.01212
+      #   kd: 1.74654
       output_averaging_samples: 2
-      derivative_averaging_samples: 6
+      # Works better without D averaging.
+      # derivative_averaging_samples: 6
     # web server version 3
     web_server:
       sorting_group_id: debug_sorting_group
@@ -384,7 +394,7 @@ sensor:
   - platform: dallas_temp
     id: chiller_temp_sensor
     name: "Chiller Temperature"
-    icon: mdi:snowflake-temperature
+    icon: mdi:snowflake-thermometer
     # web server version 3
     web_server:
       sorting_group_id: status_sorting_group
