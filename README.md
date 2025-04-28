@@ -4,7 +4,11 @@ The FilaBilly Humidor (FBH) is a smart cabinet for 3D printer filament storage a
 
 The FilaBilly Humidor is based on [ESPHome](https://esphome.io/).  It can be used as a standalone device or integrated into [Home Assistant](https://homeassistant.io/).
 
+**Status:** Mostly vaporware.  Some materials have been acquired.
+
 ## FilaBilly Dehumidifier
-![FilaBilly Dehumidifier](Media/fbh-glamor.jpeg)
+![FilaBilly Dehumidifier](Media/fbd-glamor.jpg)
 
 The FilaBilly Dehumidifier (FBD) is the dehumidifier component.  It is a compact active dehumidifier that is also Internet enabled.  The FBD can also be used without the FBH, either standalone or directly integrated into Home Assistant.  The FBD also uses ESPHome.
+
+**Status:** Designed, printed, tested.
